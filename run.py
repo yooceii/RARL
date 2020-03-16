@@ -1,8 +1,10 @@
 import copy
 import glob
 import os
+import sys
 import time
 from collections import deque
+import logging
 
 import gym
 import numpy as np
@@ -10,6 +12,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.multiprocessing as mp
+from torch.utils.tensorboard import SummaryWriter
+
 
 from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
@@ -19,10 +24,18 @@ from a2c_ppo_acktr.model import Policy
 from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
 
+from baselines.ppo2.ppo2 import safemean
+from baselines import logger
 
+from SimCLR.data_aug.data_transform import DataTransform, get_data_transform_opes
+from SimCLR.utils import get_similarity_function
+from SimCLR.utils import step as loss
+
+logging.basicConfig(level=logging.INFO)
+cuda_id = 0
 def main():
     args = get_args()
-
+    
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
@@ -30,23 +43,42 @@ def main():
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
+    
     log_dir = os.path.expanduser(args.log_dir)
+    logger.configure(log_dir)
+    writer = SummaryWriter(log_dir)
     eval_log_dir = log_dir + "_eval"
     utils.cleanup_log_dir(log_dir)
     utils.cleanup_log_dir(eval_log_dir)
 
-    torch.set_num_threads(1)
-    device = torch.device("cuda:0" if args.cuda else "cpu")
-
+    torch.set_num_threads(36)
+    device = torch.device("cuda:{}".format(cuda_id) if args.cuda else "cpu")
+#     device = torch.device("cpu")
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                          args.gamma, args.log_dir, device, False)
 
+    
     actor_critic = Policy(
         envs.observation_space.shape,
         envs.action_space,
         base_kwargs={'recurrent': args.recurrent_policy})
+    
     actor_critic.to(device)
+    # actor_critic.simclr = nn.DataParallel(actor_critic.simclr)
+    
 
+    # SimCLR setup
+    data_augment = get_data_transform_opes(s=1, crop_size=96)
+    transform = DataTransform(data_augment)
+    batch_size = args.num_processes
+    _, similarity_func = get_similarity_function(True)
+    simclr_optimizer = optim.Adam(actor_critic.simclr.parameters(), 3e-4)
+    megative_mask = (1 - torch.eye(2 * batch_size)).type(torch.bool)
+    labels = (np.eye((2 * batch_size), 2 * batch_size - 1, k=-batch_size) + np.eye((2 * batch_size), 2 * batch_size - 1,                                                                        k=batch_size - 1)).astype(np.int)
+    labels = torch.from_numpy(labels).cuda(cuda_id)
+    softmax = torch.nn.Softmax(dim=-1)
+    temperature = 0.5
+    
     if args.algo == 'a2c':
         agent = algo.A2C_ACKTR(
             actor_critic,
@@ -97,11 +129,12 @@ def main():
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
 
-    episode_rewards = deque(maxlen=10)
+    epinfo = deque(maxlen=10)
 
     start = time.time()
     num_updates = int(
         args.num_env_steps) // args.num_steps // args.num_processes
+    
     for j in range(num_updates):
 
         if args.use_linear_lr_decay:
@@ -116,13 +149,13 @@ def main():
                 value, action, action_log_prob, recurrent_hidden_states = actor_critic.act(
                     rollouts.obs[step], rollouts.recurrent_hidden_states[step],
                     rollouts.masks[step])
-
+            
             # Obser reward and next obs
             obs, reward, done, infos = envs.step(action)
 
             for info in infos:
                 if 'episode' in info.keys():
-                    episode_rewards.append(info['episode']['r'])
+                    epinfo.append(info['episode'])
 
             # If done then clean the history of observations.
             masks = torch.FloatTensor(
@@ -130,6 +163,52 @@ def main():
             bad_masks = torch.FloatTensor(
                 [[0.0] if 'bad_transition' in info.keys() else [1.0]
                  for info in infos])
+
+            # SimCLR update
+            aug_obs = obs.cpu().numpy()
+            # Is = []
+            # Js = []
+            # for i in aug_obs:
+            #     tmp_Is = []
+            #     tmp_Js = []
+            #     for c in i:
+            #         a, b = transform.aug(c.astype(np.uint8))
+            #         tmp_Is += [a]
+            #         tmp_Js += [b]
+            #     Is += [tmp_Is]
+            #     Js += [tmp_Js]
+            # Is = np.array(Is)
+            # Js = np.array(Js)
+            Is = np.random.rand(*obs.shape)
+            Js = np.random.rand(*obs.shape)
+            Is = torch.tensor(Is).float().cuda(cuda_id)
+            Js = torch.tensor(Js).float().cuda(cuda_id)
+            for _ in range(1):
+                # Q = mp.Queue()
+                # actor_critic.simclr.share_memory()
+                # p1 = mp.Process(target=actor_critic.simclr, args=(Is,))
+                # p2 = mp.Process(target=actor_critic.simclr, args=(Js,))
+                # p1.start()
+                # p2.start()
+                # processes = [p1, p2]
+                # for p in processes: p.join()
+                # zis = actor_critic.simclr.get()
+                # zjs = actor_critic.simclr.get()
+                # assert actor_critic.simclr.Q.empty() is True
+
+                zis = actor_critic.simclr(Is)
+                zjs = actor_critic.simclr(Js)
+                # print(zis.shape, zjs.shape)
+                l = loss(zis, zjs, megative_mask, labels, similarity_func, batch_size, softmax, 0.5)
+                l.backward()
+                simclr_optimizer.step()
+                # print("simclr update")
+            
+            with torch.no_grad():
+                value, _, action_log_prob, recurrent_hidden_states = actor_critic.act(
+                    rollouts.obs[step], rollouts.recurrent_hidden_states[step],
+                    rollouts.masks[step])
+            
             rollouts.insert(obs, recurrent_hidden_states, action,
                             action_log_prob, value, reward, masks, bad_masks)
 
@@ -174,25 +253,35 @@ def main():
                 actor_critic,
                 getattr(utils.get_vec_normalize(envs), 'ob_rms', None)
             ], os.path.join(save_path, args.env_name + ".pt"))
+        
+        
 
-        if j % args.log_interval == 0 and len(episode_rewards) > 1:
+        if args.log_dir and j % args.log_interval == 0 and len(epinfo) > 1:
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
             end = time.time()
+            fps = int(total_num_steps / (end - start))
             print(
-                "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, min/max reward {:.1f}/{:.1f}\n"
+                "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, mean win-ratio {:.1f}\n"
                 .format(j, total_num_steps,
-                        int(total_num_steps / (end - start)),
-                        len(episode_rewards), np.mean(episode_rewards),
-                        np.median(episode_rewards), np.min(episode_rewards),
-                        np.max(episode_rewards), dist_entropy, value_loss,
-                        action_loss))
-
-        if (args.eval_interval is not None and len(episode_rewards) > 1
+                        fps,
+                        len(epinfo), np.mean([i['r'] for i in epinfo]),
+                        np.median([i['r'] for i in epinfo]), np.mean([i['c'] for i in epinfo])))
+            writer.add_scalar("eprewmean", safemean([i['r'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("eplenmean", safemean([i['l'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("eplvlsmean", safemean([i['c'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("fps", fps, total_num_steps)
+            writer.add_scalar("policy_entropy", dist_entropy, total_num_steps)
+            writer.add_scalar("value_loss", value_loss, total_num_steps)
+            writer.add_scalar("action_loss", action_loss, total_num_steps)
+            writer.add_scalar("total_timesteps", total_num_steps, total_num_steps)
+            
+        if (args.eval_interval is not None and len(epinfo) > 1
                 and j % args.eval_interval == 0):
             ob_rms = utils.get_vec_normalize(envs).ob_rms
             evaluate(actor_critic, ob_rms, args.env_name, args.seed,
                      args.num_processes, eval_log_dir, device)
-
+    
 
 if __name__ == "__main__":
     main()
+    
