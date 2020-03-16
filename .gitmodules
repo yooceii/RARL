@@ -1,0 +1,6 @@
+[submodule "GVGAI_GYM"]
+	path = GVGAI_GYM
+	url = https://github.com/Bam4d/GVGAI_GYM
+[submodule "baselines"]
+	path = baselines
+	url = https://github.com/openai/baselines
