@@ -4,3 +4,9 @@
 [submodule "baselines"]
 	path = baselines
 	url = https://github.com/openai/baselines
+[submodule "pytorch-a2c-ppo-acktr-gail"]
+	path = pytorch-a2c-ppo-acktr-gail
+	url = https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail
+[submodule "SimCLR"]
+	path = SimCLR
+	url = https://github.com/sthalles/SimCLR
