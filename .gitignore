@@ -72,6 +72,9 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Visual Studio
+.vscode/
+
 # pyenv
 .python-version
 
