@@ -123,12 +123,8 @@ def get_args():
         help='environment to train on (default: PongNoFrameskip-v4)')
     parser.add_argument(
         '--log-dir',
-        default='/tmp/gym/',
-        help='directory to save agent logs (default: /tmp/gym)')
-    parser.add_argument(
-        '--save-dir',
-        default='./trained_models/',
-        help='directory to save agent logs (default: ./trained_models/)')
+        default='rarl',
+        help='directory to save agent logs (default: /runs/rarl_...)')
     parser.add_argument(
         '--no-cuda',
         action='store_true',
@@ -149,6 +145,37 @@ def get_args():
         action='store_true',
         default=True,
         help='use a linear schedule on the learning rate')
+
+    parser.add_argument(
+        '--saved-encoder',
+        default=None,
+        help = 'File name of saved encoder to load, located in /runs/<experiment name>/checkpoints')
+    parser.add_argument(
+        '--simclr-weight-decay',
+        default=10e-6,
+        help='Training weight decay')
+    parser.add_argument(
+        '--color-jitter-magnitude'
+        default=1,
+        help='How much color jitter to apply, represented as s originally')
+    parser.add_argument(
+        '--encoder_model'.
+        default='resnet18'
+        help='Encoder Model to use: resnet18 | resnet50')
+    parser.add_argument(
+        '--encoding-size',
+        type=int,
+        default=256,
+        help='Observation encoding size')
+    parser.add_argument(
+        '-contrastive-loss-temp',
+        default=.5,
+        help = 'Temperature for contrastive loss where 0 < t <= 1'
+    parser.add_argument(
+        '--use-dot-similarity',
+        action='store_true',
+        default=False,
+        help = 'Whether to use Cosine similarity or dot product distance')
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()

@@ -18,19 +18,14 @@ from torch.utils.tensorboard import SummaryWriter
 from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
 from a2c_ppo_acktr.envs import make_vec_envs
+from a2c_ppo_acktr.model import Policy
 from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
 
 from baselines.ppo2.ppo2 import safemean
 from baselines import logger
 
-from SimCLR.data_aug.data_transform import DataTransform, get_data_transform_opes
-from SimCLR.utils import get_similarity_function
-from SimCLR.utils import step as loss
-
 from arguments import get_args
-from model.policy import Policy
-from model.encoder import Encoder
 from representation import SimCLR
 
 logging.basicConfig(level=logging.INFO)
@@ -45,9 +40,10 @@ def main():
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
-    log_dir = os.path.expanduser(args.log_dir)
+    writer = SummaryWriter(args.log_dir)
+    log_dir = os.path.join(writer.log_dir, 'logging')
+    save_dir = os.path.join(writer.log_dir, 'policy_checkpoints')
     logger.configure(log_dir)
-    writer = SummaryWriter(log_dir)
     eval_log_dir = log_dir + "_eval"
     utils.cleanup_log_dir(log_dir)
     utils.cleanup_log_dir(eval_log_dir)
@@ -56,19 +52,15 @@ def main():
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                          args.gamma, args.log_dir, device, False)
 
-    raise Excpetion('Instantiate Encoder, Projection Head, and actor-critic here')
-    raise Exception('Use local model.py file to have it use base policy, not CNN')
     actor_critic = Policy(
-        envs.observation_space.shape,
+        (arg.encoding_size),
         envs.action_space,
         base_kwargs={'recurrent': args.recurrent_policy})
 
     actor_critic.to(device)
-    # actor_critic.simclr = nn.DataParallel(actor_critic.simclr)
 
-
-    # SimCLR setup
-    simclr = SimCLR(batch_size, device, .5)
+    # Representation Learning Module
+    simclr = SimCLR(envs.observation_space.shape, writer, device)
 
     if args.algo == 'a2c':
         agent = algo.A2C_ACKTR(
@@ -95,6 +87,7 @@ def main():
             actor_critic, args.value_loss_coef, args.entropy_coef, acktr=True)
 
     if args.gail:
+        raise Exception('Gail needs to work with encoding')
         assert len(envs.observation_space.shape) == 1
         discr = gail.Discriminator(
             envs.observation_space.shape[0] + envs.action_space.shape[0], 100,
@@ -117,6 +110,7 @@ def main():
                               actor_critic.recurrent_hidden_state_size)
 
     obs = envs.reset()
+    obs = simclr.encode(obs)
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
 
@@ -143,6 +137,8 @@ def main():
 
             # Obser reward and next obs
             obs, reward, done, infos = envs.step(action)
+            simclr.insert(obs)
+            obs = simclr.encode(obs)
 
             for info in infos:
                 if 'episode' in info.keys():
@@ -155,17 +151,19 @@ def main():
                 [[0.0] if 'bad_transition' in info.keys() else [1.0]
                  for info in infos])
 
-            # SimCLR update
-            simclr.upddate_encoder(obs)
-            raise Exception('Add code here to recompute action_log_prob and value')
+            rollouts.insert(obs, recurrent_hidden_states, action,
+                            action_log_prob, value, reward, masks, bad_masks)
 
-            with torch.no_grad():
+        #Update Encodings
+        obs = simclr.update_encoder()
+        with torch.no_grad():
+            for step, ob in enumerate(obs):
                 value, _, action_log_prob, recurrent_hidden_states = actor_critic.act(
                     rollouts.obs[step], rollouts.recurrent_hidden_states[step],
                     rollouts.masks[step])
-
-            rollouts.insert(obs, recurrent_hidden_states, action,
-                            action_log_prob, value, reward, masks, bad_masks)
+                rollouts.insert(ob, recurent_hidden_states, rollouts.actions[step],
+                           action_log_prob, value, rollouts.rewards[step],
+                           rollouts.masks[step], rollouts.bad_masks[step])
 
         with torch.no_grad():
             next_value = actor_critic.get_value(
@@ -173,6 +171,7 @@ def main():
                 rollouts.masks[-1]).detach()
 
         if args.gail:
+            raise Exception('Need to verify that Gail data is compatible with encodings')
             if j >= 10:
                 envs.venv.eval()
 
@@ -197,8 +196,8 @@ def main():
 
         # save for every interval-th episode or for the last epoch
         if (j % args.save_interval == 0
-                or j == num_updates - 1) and args.save_dir != "":
-            save_path = os.path.join(args.save_dir, args.algo)
+                or j == num_updates - 1) and save_dir != "":
+            save_path = os.path.join(save_dir, args.algo)
             try:
                 os.makedirs(save_path)
             except OSError:
