@@ -17,7 +17,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
-from a2c_ppo_acktr.envs import make_vec_envs
 from a2c_ppo_acktr.model import Policy
 from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
@@ -27,8 +26,10 @@ from baselines import logger
 
 from arguments import get_args
 from representation import SimCLR
+from envs import make_vec_envs
 
 logging.basicConfig(level=logging.INFO)
+import pdb
 
 def main():
     args = get_args()
@@ -49,11 +50,13 @@ def main():
     utils.cleanup_log_dir(eval_log_dir)
 
     device = 'cuda' if args.cuda else "cpu"
+    #For ProcGen could remove baselines dependency (but still need wrappers)
+    #venv = ProcgenEnv(num_envs=args.num_processes, env_name=args.env_name)
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                          args.gamma, args.log_dir, device, False)
-
+    print("No Framestack at the momement")
     actor_critic = Policy(
-        (arg.encoding_size),
+        (args.encoding_size,),
         envs.action_space,
         base_kwargs={'recurrent': args.recurrent_policy})
 
@@ -106,7 +109,7 @@ def main():
             drop_last=drop_last)
 
     rollouts = RolloutStorage(args.num_steps, args.num_processes,
-                              envs.observation_space.shape, envs.action_space,
+                              (args.encoding_size,), envs.action_space,
                               actor_critic.recurrent_hidden_state_size)
 
     obs = envs.reset()
@@ -161,7 +164,7 @@ def main():
                 value, _, action_log_prob, recurrent_hidden_states = actor_critic.act(
                     rollouts.obs[step], rollouts.recurrent_hidden_states[step],
                     rollouts.masks[step])
-                rollouts.insert(ob, recurent_hidden_states, rollouts.actions[step],
+                rollouts.insert(ob, recurrent_hidden_states, rollouts.actions[step],
                            action_log_prob, value, rollouts.rewards[step],
                            rollouts.masks[step], rollouts.bad_masks[step])
 
@@ -217,10 +220,10 @@ def main():
                 .format(j, total_num_steps,
                         fps,
                         len(epinfo), np.mean([i['r'] for i in epinfo]),
-                        np.median([i['r'] for i in epinfo]), np.mean([i['c'] for i in epinfo])))
+                        np.median([i['r'] for i in epinfo]), np.mean([i['t'] for i in epinfo])))
             writer.add_scalar("eprewmean", safemean([i['r'] for i in epinfo]), total_num_steps)
             writer.add_scalar("eplenmean", safemean([i['l'] for i in epinfo]), total_num_steps)
-            writer.add_scalar("eplvlsmean", safemean([i['c'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("eplvlsmean", safemean([i['t'] for i in epinfo]), total_num_steps)
             writer.add_scalar("fps", fps, total_num_steps)
             writer.add_scalar("policy_entropy", dist_entropy, total_num_steps)
             writer.add_scalar("value_loss", value_loss, total_num_steps)
@@ -236,4 +239,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

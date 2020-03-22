@@ -111,3 +111,7 @@ trained_models/
 # Custom
 ./trained_models
 token
+
+#Logging
+rarl/
+runs/

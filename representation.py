@@ -1,12 +1,13 @@
 import os
 
 from SimCLR.models.resnet_simclr import ResNetSimCLR
-from SimCLR.data_aug.guassian_blur import GuassianBlur
+from SimCLR.data_aug.gaussian_blur import GaussianBlur
 from SimCLR.loss.nt_xent import NTXentLoss
 
 from arguments import get_args
 
 import torch
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 
 import pdb
@@ -16,6 +17,7 @@ class SimCLR:
         args = get_args()
         self.num_steps = args.num_steps
         self.num_processes = args.num_processes
+        self.input_shape = input_shape
         self.temperature = args.contrastive_loss_temp
         self.writer = writer
         self.device = device
@@ -23,20 +25,28 @@ class SimCLR:
         self.save_interval = args.save_interval
         self.updates = 0
 
-        self.data = torch.zeros(num_steps, num_processes, *input_shape).to(device)
+        self.data = torch.zeros(self.num_steps, self.num_processes, *input_shape).to(device)
         self.step = 0
 
         #Data augmentation
+        print('Verify transforms by looking at them in jupyter')
         s = args.color_jitter_magnitude
         color_jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
-        self.transforms = transforms.Compose([transforms.RandomResizedCrop(size=self.input_shape[0]),
+        self.transforms = transforms.Compose([transforms.ToPILImage(),
+                                              transforms.RandomResizedCrop(size=input_shape[-2:], scale=(0.8,1.0)),
                                               transforms.RandomHorizontalFlip(),
+                                              transforms.RandomVerticalFlip(),
+                                              transforms.RandomRotation(90),
                                               transforms.RandomApply([color_jitter], p=0.8),
                                               transforms.RandomGrayscale(p=0.2),
-                                              GaussianBlur(kernel_size=int(0.1 * self.input_shape[0])),
+                                              GaussianBlur(kernel_size=2*int(0.05 * input_shape[-1])+1),
                                               transforms.ToTensor()])
+        #Add RandomAffine()? for rotations, translation, scale (cropping), and shear
+        #Add perspective?
+
         #Networks
-        self.model = ResNetSimCLR(args.encoding_size, args.encoder_model)
+        print('Make this data parallel if multiple GPU are available')
+        self.model = ResNetSimCLR(args.encoder_model, args.encoding_size)
         self._load_pretrained_weights(args.saved_encoder)
         self.model.to(device)
 
@@ -88,9 +98,11 @@ class SimCLR:
                 torch.save(self.model.save_dict(), os.path.join(self.model_checkpoints, 'model.pth'))
 
             # warmup for the first 10 epochs
-            if(self.updates/self.save_intervale >= 10):
+            if(self.updates/self.save_interval >= 10):
                 self.scheduler.step()
             self.writer.add_scalar('Representation/cosine_lr_decay', self.scheduler.get_lr()[0], global_step=self.updates)
+
+        return self.encode(self._batch_view(self.data)).view(self.num_steps, self.num_processes, -1)
 
     def replay_buffer(self):
         raise Exception('Not implemented, could store buffer to mix in update_encoder for more stable updates')
@@ -109,11 +121,13 @@ class SimCLR:
         loss = self.criterion(zis, zjs)
         return loss
 
+    def _batch_view(self, obs):
+        return obs.view(-1, *self.input_shape)
+
     def _transform(self, obs):
-        s, p, d, h, w = obs.size()
-        obs = obs.view(-1, d, h, w)
-        xis = self.transforms(obs)
-        xjs = self.transforms(obs)
+        obs = self._batch_view(obs)
+        xis = torch.stack([self.transforms(ob.cpu()) for ob in obs])
+        xjs = torch.stack([self.transforms(ob.cpu()) for ob in obs])
         return xis, xjs
 
     def _load_pretrained_weights(self, file):

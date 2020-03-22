@@ -119,7 +119,7 @@ def get_args():
         help='number of environment steps to train (default: 10e6)')
     parser.add_argument(
         '--env-name',
-        default='PongNoFrameskip-v4',
+        default='procgen:procgen-coinrun-v0',
         help='environment to train on (default: PongNoFrameskip-v4)')
     parser.add_argument(
         '--log-dir',
@@ -155,26 +155,27 @@ def get_args():
         default=10e-6,
         help='Training weight decay')
     parser.add_argument(
-        '--color-jitter-magnitude'
+        '--color-jitter-magnitude',
         default=1,
         help='How much color jitter to apply, represented as s originally')
     parser.add_argument(
-        '--encoder_model'.
-        default='resnet18'
+        '--encoder_model',
+        default='resnet18',
         help='Encoder Model to use: resnet18 | resnet50')
     parser.add_argument(
         '--encoding-size',
         type=int,
-        default=256,
+        default=512,
         help='Observation encoding size')
     parser.add_argument(
         '-contrastive-loss-temp',
         default=.5,
-        help = 'Temperature for contrastive loss where 0 < t <= 1'
+        help = 'Temperature for contrastive loss where 0 < t <= 1')
+    print('Cosine Similarity causes memory issues, check SimCLR for bug')
     parser.add_argument(
         '--use-dot-similarity',
         action='store_true',
-        default=False,
+        default=True,
         help = 'Whether to use Cosine similarity or dot product distance')
     args = parser.parse_args()
 
