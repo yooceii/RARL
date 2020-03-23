@@ -41,7 +41,7 @@ def main():
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
-    writer = SummaryWriter(args.log_dir)
+    writer = SummaryWriter(comment=args.log_dir)
     log_dir = os.path.join(writer.log_dir, 'logging')
     save_dir = os.path.join(writer.log_dir, 'policy_checkpoints')
     logger.configure(log_dir)
@@ -221,14 +221,14 @@ def main():
                         fps,
                         len(epinfo), np.mean([i['r'] for i in epinfo]),
                         np.median([i['r'] for i in epinfo]), np.mean([i['t'] for i in epinfo])))
-            writer.add_scalar("eprewmean", safemean([i['r'] for i in epinfo]), total_num_steps)
-            writer.add_scalar("eplenmean", safemean([i['l'] for i in epinfo]), total_num_steps)
-            writer.add_scalar("eplvlsmean", safemean([i['t'] for i in epinfo]), total_num_steps)
-            writer.add_scalar("fps", fps, total_num_steps)
-            writer.add_scalar("policy_entropy", dist_entropy, total_num_steps)
-            writer.add_scalar("value_loss", value_loss, total_num_steps)
-            writer.add_scalar("action_loss", action_loss, total_num_steps)
-            writer.add_scalar("total_timesteps", total_num_steps, total_num_steps)
+            writer.add_scalar("Episodes/eprewmean", safemean([i['r'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("Episodes/eplenmean", safemean([i['l'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("Episodes/eplvlsmean", safemean([i['t'] for i in epinfo]), total_num_steps)
+            writer.add_scalar("RL/policy_entropy", dist_entropy, total_num_steps)
+            writer.add_scalar("RL/value_loss", value_loss, total_num_steps)
+            writer.add_scalar("RL/action_loss", action_loss, total_num_steps)
+            writer.add_scalar("Performance/fps", fps, total_num_steps)
+            writer.add_scalar("Performance/total_timesteps", total_num_steps, total_num_steps)
 
         if (args.eval_interval is not None and len(epinfo) > 1
                 and j % args.eval_interval == 0):

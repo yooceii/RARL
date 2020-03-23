@@ -123,7 +123,7 @@ def get_args():
         help='environment to train on (default: PongNoFrameskip-v4)')
     parser.add_argument(
         '--log-dir',
-        default='rarl',
+        default='_rarl',
         help='directory to save agent logs (default: /runs/rarl_...)')
     parser.add_argument(
         '--no-cuda',

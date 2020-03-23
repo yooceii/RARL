@@ -22,6 +22,7 @@ class SimCLR:
         self.writer = writer
         self.device = device
         self.model_checkpoints = os.path.join(writer.log_dir, 'encoder_checkpoints')
+        os.makedirs(self.model_checkpoints, exist_ok=True)
         self.save_interval = args.save_interval
         self.updates = 0
 
@@ -54,7 +55,7 @@ class SimCLR:
         use_cosine = not args.use_dot_similarity
         self.criterion = NTXentLoss(device, self.num_steps*self.num_processes, self.temperature, use_cosine)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), 3e-4, weight_decay=args.simclr_weight_decay)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), 3e-2, weight_decay=args.simclr_weight_decay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=0, last_epoch=-1)
 
     def insert(self, obs):
@@ -95,7 +96,7 @@ class SimCLR:
             #    valid_n_iter += 1
 
             if(self.updates % self.save_interval == 0):
-                torch.save(self.model.save_dict(), os.path.join(self.model_checkpoints, 'model.pth'))
+                torch.save(self.model.state_dict(), os.path.join(self.model_checkpoints, 'model.pth'))
 
             # warmup for the first 10 epochs
             if(self.updates/self.save_interval >= 10):
