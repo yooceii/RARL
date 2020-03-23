@@ -6,6 +6,8 @@ import time
 from collections import deque
 import logging
 
+from joblib import Parallel, delayed
+
 import gym
 import numpy as np
 import torch
@@ -153,6 +155,7 @@ def main():
             # Obser reward and next obs
             obs, reward, done, infos = envs.step(action)
 
+            # start = time.time()
             for info in infos:
                 if 'episode' in info.keys():
                     epinfo.append(info['episode'])
@@ -163,24 +166,37 @@ def main():
             bad_masks = torch.FloatTensor(
                 [[0.0] if 'bad_transition' in info.keys() else [1.0]
                  for info in infos])
+            # end = time.time()
+            # print(end-start)
+
 
             # SimCLR update
+            # aug_obs = obs.cpu().view(-1, obs.shape[2], obs.shape[3]).numpy().astype(np.uint8)
+            # a = time.time()
+            # results = np.array(Parallel(n_jobs=-1)(delayed(transform.aug)(x) for x in aug_obs))
+            # # print(time.time()-a)
+            # Is = results[:,0,:,:].reshape(obs.shape[0], obs.shape[1], results.shape[2], results.shape[3])
+            # Js = results[:,1,:,:].reshape(obs.shape[0], obs.shape[1], results.shape[2], results.shape[3])
+
+
             aug_obs = obs.cpu().numpy()
-            # Is = []
-            # Js = []
-            # for i in aug_obs:
-            #     tmp_Is = []
-            #     tmp_Js = []
-            #     for c in i:
-            #         a, b = transform.aug(c.astype(np.uint8))
-            #         tmp_Is += [a]
-            #         tmp_Js += [b]
-            #     Is += [tmp_Is]
-            #     Js += [tmp_Js]
-            # Is = np.array(Is)
-            # Js = np.array(Js)
-            Is = np.random.rand(*obs.shape)
-            Js = np.random.rand(*obs.shape)
+            Is = []
+            Js = []
+            for i in aug_obs:
+                tmp_Is = []
+                tmp_Js = []
+                for c in i:
+                    a, b = transform.aug(c.astype(np.uint8))
+                    tmp_Is += [a]
+                    tmp_Js += [b]
+                Is += [tmp_Is]
+                Js += [tmp_Js]
+            # start = time.time()
+            # print(start-end)
+            Is = np.array(Is)
+            Js = np.array(Js)
+            # Is = np.random.rand(*obs.shape)
+            # Js = np.random.rand(*obs.shape)
             Is = torch.tensor(Is).float().cuda(cuda_id)
             Js = torch.tensor(Js).float().cuda(cuda_id)
             for _ in range(1):
