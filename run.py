@@ -53,7 +53,7 @@ def main():
     #For ProcGen could remove baselines dependency (but still need wrappers)
     #venv = ProcgenEnv(num_envs=args.num_processes, env_name=args.env_name)
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
-                         args.gamma, args.log_dir, device, False)
+                         args.gamma, writer.log_dir, device, False)
     print("No Framestack at the momement")
     actor_critic = Policy(
         (args.encoding_size,),

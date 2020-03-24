@@ -10,6 +10,9 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 
+import torch.multiprocessing as mp
+mp.set_sharing_strategy('file_system')
+
 import pdb
 
 class SimCLR:
@@ -46,10 +49,10 @@ class SimCLR:
         #Add perspective?
 
         #Networks
-        print('Make this data parallel if multiple GPU are available')
         self.model = ResNetSimCLR(args.encoder_model, args.encoding_size)
         self._load_pretrained_weights(args.saved_encoder)
-        self.model.to(device)
+        if(device is not 'cpu'):
+            self.model = torch.nn.DataParallel(self.model)
 
         #Optimization
         use_cosine = not args.use_dot_similarity
@@ -126,10 +129,11 @@ class SimCLR:
         return obs.view(-1, *self.input_shape)
 
     def _transform(self, obs):
-        obs = self._batch_view(obs)
-        xis = torch.stack([self.transforms(ob.cpu()) for ob in obs])
-        xjs = torch.stack([self.transforms(ob.cpu()) for ob in obs])
-        return xis, xjs
+        obs = self._batch_view(obs).cpu()
+        with mp.Pool(4) as pool:
+            xis = pool.map(self.transforms, [ob for ob in obs])
+            xjs = pool.map(self.transforms, [ob for ob in obs])
+        return torch.stack(xis), torch.stack(xjs)
 
     def _load_pretrained_weights(self, file):
         if(file is not None):
