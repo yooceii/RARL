@@ -169,7 +169,7 @@ def get_args():
         help='Observation encoding size')
     parser.add_argument(
         '-contrastive-loss-temp',
-        default=.5,
+        default=.1,
         help = 'Temperature for contrastive loss where 0 < t <= 1')
     print('Cosine Similarity causes memory issues, check SimCLR for bug')
     parser.add_argument(

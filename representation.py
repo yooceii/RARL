@@ -37,17 +37,14 @@ class SimCLR:
         s = args.color_jitter_magnitude
         color_jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
         self.transforms = transforms.Compose([transforms.ToPILImage(),
-                                              transforms.RandomResizedCrop(size=input_shape[-2:], scale=(0.8,1.0)),
+                                              transforms.RandomAffine(45, None, (.5,.7), None),
                                               transforms.RandomHorizontalFlip(),
                                               transforms.RandomVerticalFlip(),
-                                              transforms.RandomRotation(90),
+                                              transforms.RandomPerspective(.5, .5),
                                               transforms.RandomApply([color_jitter], p=0.8),
                                               transforms.RandomGrayscale(p=0.2),
                                               GaussianBlur(kernel_size=2*int(0.05 * input_shape[-1])+1),
                                               transforms.ToTensor()])
-        #Add RandomAffine()? for rotations, translation, scale (cropping), and shear
-        #Add perspective?
-
         #Networks
         self.model = ResNetSimCLR(args.encoder_model, args.encoding_size)
         self._load_pretrained_weights(args.saved_encoder)
@@ -58,7 +55,9 @@ class SimCLR:
         use_cosine = not args.use_dot_similarity
         self.criterion = NTXentLoss(device, self.num_steps*self.num_processes, self.temperature, use_cosine)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), 3e-2, weight_decay=args.simclr_weight_decay)
+        #self.optimizer = torch.optim.Adam(self.model.parameters(), 3e-1, weight_decay=args.simclr_weight_decay)
+        lr = .03*(self.num_steps*self.num_processes//256)
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr, weight_decay=args.simclr_weight_decay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=0, last_epoch=-1)
 
     def insert(self, obs):
@@ -130,9 +129,11 @@ class SimCLR:
 
     def _transform(self, obs):
         obs = self._batch_view(obs).cpu()
-        with mp.Pool(4) as pool:
-            xis = pool.map(self.transforms, [ob for ob in obs])
-            xjs = pool.map(self.transforms, [ob for ob in obs])
+        #with mp.Pool(4) as pool:
+        #    xis = pool.map(self.transforms, obs)
+        #    xjs = pool.map(self.transforms, obs)
+        xis = [self.transforms(i) for i in obs]
+        xjs = [self.transforms(i) for i in obs]
         return torch.stack(xis), torch.stack(xjs)
 
     def _load_pretrained_weights(self, file):
