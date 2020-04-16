@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from gym.spaces.box import Box
 
+from procgen import ProcgenEnv
+
 from baselines import bench
 from baselines.common.atari_wrappers import make_atari, wrap_deepmind
 from baselines.common.vec_env import VecEnvWrapper
@@ -12,6 +14,10 @@ from baselines.common.vec_env.dummy_vec_env import DummyVecEnv
 from baselines.common.vec_env.shmem_vec_env import ShmemVecEnv
 from baselines.common.vec_env.vec_normalize import \
     VecNormalize as VecNormalize_
+
+from wrapper.utils import make_gvgai
+from wrapper.gvgai_wrapper import GVGAIWrapper
+from wrapper.procgen_wrapper import ProcgenWrapper
 
 import pdb
 
@@ -40,12 +46,16 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets):
             _, domain, task = env_id.split('.')
             env = dm_control2gym.make(domain_name=domain, task_name=task)
         else:
-            env = gym.make(env_id, start_level=0, num_levels=100)
+            env = gym.make(env_id, start_level=seed, num_levels=100)
 
         is_atari = hasattr(gym.envs, 'atari') and isinstance(
             env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
+        is_gvgai = "gvgai" in env_id and isinstance(
+            env.unwrapped, gvgai.gym.GVGAI_Env)
         if is_atari:
             env = make_atari(env_id)
+        elif is_gvgai:
+            env = make_gvgai(env_id)
 
         env.seed(seed + rank)
 
@@ -57,6 +67,8 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets):
                 env,
                 os.path.join(log_dir, str(rank)),
                 allow_early_resets=allow_early_resets)
+            if is_gvgai:
+                env = GVGAIWrapper(env)
 
         if is_atari:
             if len(env.observation_space.shape) == 3:
@@ -76,6 +88,28 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets):
 
     return _thunk
 
+def make_procgen_vec_envs(env_name,
+                  seed,
+                  num_processes,
+                  gamma,
+                  device,
+                  num_frame_stack=None):
+    envs = ProcgenWrapper(ProcgenEnv(num_envs=num_processes, start_level=seed, env_name=env_name.split("-")[1]), wrapframe=False)
+
+    if len(envs.observation_space.shape) == 1:
+        if gamma is None:
+            envs = VecNormalize(envs, ret=False)
+        else:
+            envs = VecNormalize(envs, gamma=gamma)
+
+    envs = VecPyTorch(envs, device)
+
+    if num_frame_stack is not None:
+        envs = VecPyTorchFrameStack(envs, num_frame_stack, device)
+    # elif len(envs.observation_space.shape) == 3:
+    #     envs = VecPyTorchFrameStack(envs, 4, device)
+
+    return envs
 
 def make_vec_envs(env_name,
                   seed,
@@ -100,7 +134,6 @@ def make_vec_envs(env_name,
             envs = VecNormalize(envs, ret=False)
         else:
             envs = VecNormalize(envs, gamma=gamma)
-
     envs = VecPyTorch(envs, device)
 
     if num_frame_stack is not None:
@@ -176,10 +209,13 @@ class VecPyTorch(VecEnvWrapper):
         return obs
 
     def step_async(self, actions):
+        # print(actions)
         if isinstance(actions, torch.LongTensor):
             # Squeeze the dimension for discrete actions
+            # print("squeeze")
             actions = actions.squeeze(1)
         actions = actions.cpu().numpy()
+        # print(actions.shape)
         self.venv.step_async(actions)
 
     def step_wait(self):

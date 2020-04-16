@@ -1,10 +1,13 @@
 import copy
 import glob
 import os
+import signal
 import sys
 import time
 from collections import deque
 import logging
+
+import torch.multiprocessing as mp
 
 import gym
 import numpy as np
@@ -12,7 +15,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
 from a2c_ppo_acktr import algo, utils
@@ -26,10 +28,41 @@ from baselines import logger
 
 from arguments import get_args
 from representation import SimCLR
-from envs import make_vec_envs
+from envs import make_vec_envs, make_procgen_vec_envs
 
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)
 import pdb
+
+# Suppress tensorflow warning
+from tensorflow.python.util import deprecation
+deprecation._PRINT_DEPRECATION_WARNINGS = False
+
+
+def simclr_update(simclr, rollouts, actor_critic, lock, q):
+    try:
+        while True:
+            if simclr.step != 0:
+                if np.random.rand() < 0.1:
+                    print(simclr.step)
+                continue
+            print("simclr update")
+            obs = simclr.update_encoder()
+            q.put(simclr.get_writer_buffer())
+            lock.acquire()
+            with torch.no_grad():
+                for step, ob in enumerate(obs):
+                    value, _, action_log_prob, recurrent_hidden_states = actor_critic.act(
+                        rollouts.obs[step], rollouts.recurrent_hidden_states[step],
+                        rollouts.masks[step])
+                    rollouts.insert(ob, recurrent_hidden_states, rollouts.actions[step],
+                                action_log_prob, value, rollouts.rewards[step],
+                                rollouts.masks[step], rollouts.bad_masks[step])
+            lock.release()
+    except Exception as error:
+        os.kill(os.getppid(), signal.SIGTERM)
+        sys.exit()
+    
+    
 
 def main():
     args = get_args()
@@ -51,9 +84,10 @@ def main():
 
     device = 'cuda' if args.cuda else "cpu"
     #For ProcGen could remove baselines dependency (but still need wrappers)
-    #venv = ProcgenEnv(num_envs=args.num_processes, env_name=args.env_name)
-    envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
-                         args.gamma, writer.log_dir, device, False)
+    # if "procgen" in args.env_name:
+    #    envs = make_procgen_vec_envs(args.env_name, args.seed, args.num_processes, args.gamma, device)
+    # else:
+    envs = make_vec_envs(args.env_name, args.seed, args.num_processes, args.gamma, writer.log_dir, device, False)
     print("No Framestack at the momement")
     actor_critic = Policy(
         (args.encoding_size,),
@@ -61,9 +95,13 @@ def main():
         base_kwargs={'recurrent': args.recurrent_policy})
 
     actor_critic.to(device)
+    actor_critic.share_memory()
 
     # Representation Learning Module
+
     simclr = SimCLR(envs.observation_space.shape, writer, device)
+    simclr.model.share_memory()
+    
 
     if args.algo == 'a2c':
         agent = algo.A2C_ACKTR(
@@ -117,14 +155,23 @@ def main():
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
 
+
     epinfo = deque(maxlen=10)
 
     start = time.time()
     num_updates = int(
         args.num_env_steps) // args.num_steps // args.num_processes
 
-    for j in range(num_updates):
+    
+    # Asynchronous Update
+    mp.set_start_method('spawn')
+    q = mp.Queue()
+    lock = mp.Lock()
+    p = mp.Process(target=simclr_update, args=(simclr, rollouts, actor_critic, lock, q))
+    p.start()
 
+    for j in range(num_updates):
+        
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
             utils.update_linear_schedule(
@@ -157,17 +204,6 @@ def main():
             rollouts.insert(obs, recurrent_hidden_states, action,
                             action_log_prob, value, reward, masks, bad_masks)
 
-        #Update Encodings
-        obs = simclr.update_encoder()
-        with torch.no_grad():
-            for step, ob in enumerate(obs):
-                value, _, action_log_prob, recurrent_hidden_states = actor_critic.act(
-                    rollouts.obs[step], rollouts.recurrent_hidden_states[step],
-                    rollouts.masks[step])
-                rollouts.insert(ob, recurrent_hidden_states, rollouts.actions[step],
-                           action_log_prob, value, rollouts.rewards[step],
-                           rollouts.masks[step], rollouts.bad_masks[step])
-
         with torch.no_grad():
             next_value = actor_critic.get_value(
                 rollouts.obs[-1], rollouts.recurrent_hidden_states[-1],
@@ -192,8 +228,9 @@ def main():
 
         rollouts.compute_returns(next_value, args.use_gae, args.gamma,
                                  args.gae_lambda, args.use_proper_time_limits)
-
+        lock.acquire()
         value_loss, action_loss, dist_entropy = agent.update(rollouts)
+        lock.release()
 
         rollouts.after_update()
 
@@ -210,32 +247,46 @@ def main():
                 actor_critic,
                 getattr(utils.get_vec_normalize(envs), 'ob_rms', None)
             ], os.path.join(save_path, args.env_name + ".pt"))
-
+        
         if args.log_dir and j % args.log_interval == 0 and len(epinfo) > 1:
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
             end = time.time()
             fps = int(total_num_steps / (end - start))
-            print(
-                "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, mean win-ratio {:.1f}\n"
-                .format(j, total_num_steps,
-                        fps,
-                        len(epinfo), np.mean([i['r'] for i in epinfo]),
-                        np.median([i['r'] for i in epinfo]), np.mean([i['t'] for i in epinfo])))
+            if "gvgai" in args.env_name:
+                print(
+                    "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, mean win-ratio {:.1f}\n"
+                    .format(j, total_num_steps,
+                            fps,
+                            len(epinfo), np.mean([i['r'] for i in epinfo]),
+                            np.median([i['r'] for i in epinfo]), np.mean([i['c'] for i in epinfo])))
+                writer.add_scalar("Episodes/eplvlsmean", safemean([i['c'] for i in epinfo]), total_num_steps)
+            else:
+                print(
+                    "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}\n"
+                    .format(j, total_num_steps,
+                            fps,
+                            len(epinfo), np.mean([i['r'] for i in epinfo]),
+                            np.median([i['r'] for i in epinfo])))
             writer.add_scalar("Episodes/eprewmean", safemean([i['r'] for i in epinfo]), total_num_steps)
             writer.add_scalar("Episodes/eplenmean", safemean([i['l'] for i in epinfo]), total_num_steps)
-            writer.add_scalar("Episodes/eplvlsmean", safemean([i['t'] for i in epinfo]), total_num_steps)
             writer.add_scalar("RL/policy_entropy", dist_entropy, total_num_steps)
             writer.add_scalar("RL/value_loss", value_loss, total_num_steps)
             writer.add_scalar("RL/action_loss", action_loss, total_num_steps)
             writer.add_scalar("Performance/fps", fps, total_num_steps)
             writer.add_scalar("Performance/total_timesteps", total_num_steps, total_num_steps)
 
+            # Might use pipe instead
+            while not q.empty():
+                log = q.get()
+                for i in log:
+                    writer.add_scalar(*i)
+
         if (args.eval_interval is not None and len(epinfo) > 1
                 and j % args.eval_interval == 0):
             ob_rms = utils.get_vec_normalize(envs).ob_rms
             evaluate(actor_critic, ob_rms, args.env_name, args.seed,
                      args.num_processes, eval_log_dir, device)
-
+    p.join()
 
 if __name__ == "__main__":
     main()

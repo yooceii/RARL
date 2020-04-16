@@ -1,4 +1,9 @@
 import os
+import time
+from collections import deque
+from copy import deepcopy
+
+import numpy as np
 
 from SimCLR.models.resnet_simclr import ResNetSimCLR
 from SimCLR.data_aug.gaussian_blur import GaussianBlur
@@ -13,6 +18,8 @@ import torchvision.transforms as transforms
 import torch.multiprocessing as mp
 mp.set_sharing_strategy('file_system')
 
+from utils import Transform
+
 import pdb
 
 class SimCLR:
@@ -21,13 +28,14 @@ class SimCLR:
         self.num_steps = args.num_steps
         self.num_processes = args.num_processes
         self.input_shape = input_shape
-        self.temperature = args.contrastive_loss_temp
-        self.writer = writer
+        self.temperature = float(args.contrastive_loss_temp)
+        # self.writer = writer
         self.device = device
         self.model_checkpoints = os.path.join(writer.log_dir, 'encoder_checkpoints')
         os.makedirs(self.model_checkpoints, exist_ok=True)
         self.save_interval = args.save_interval
         self.updates = 0
+        self.writer_buffer = []
 
         self.data = torch.zeros(self.num_steps, self.num_processes, *input_shape).to(device)
         self.step = 0
@@ -45,11 +53,18 @@ class SimCLR:
                                               transforms.RandomGrayscale(p=0.2),
                                               GaussianBlur(kernel_size=2*int(0.05 * input_shape[-1])+1),
                                               transforms.ToTensor()])
+        
+        # DAIL setup
+        # self.pipe = Transform(self.num_processes, -1, device_id, s, input_shape)
+        
+        #Add RandomAffine()? for rotations, translation, scale (cropping), and shear
+        #Add perspective?
+
         #Networks
-        self.model = ResNetSimCLR(args.encoder_model, args.encoding_size)
+        self.model = ResNetSimCLR(args.encoder_model, args.encoding_size).to(device)
         self._load_pretrained_weights(args.saved_encoder)
-        if(device is not 'cpu'):
-            self.model = torch.nn.DataParallel(self.model)
+        # if(device is not 'cpu'):
+        #     self.model = torch.nn.DataParallel(self.model)
 
         #Optimization
         use_cosine = not args.use_dot_similarity
@@ -72,15 +87,18 @@ class SimCLR:
     def update_encoder(self):
         for update in range(1):
             self.optimizer.zero_grad()
-
+            
+            a = time.time()
             xis, xjs = self._transform(self.data)
+            # print(time.time() - a)
             xis = xis.to(self.device)
             xjs = xjs.to(self.device)
 
             loss = self._step(xis, xjs)
             loss.backward()
 
-            self.writer.add_scalar('Representation/train_loss', loss.item(), global_step=self.updates)
+            
+            self.writer_buffer.append(('Representation/train_loss', loss.item(), self.updates))
 
             self.optimizer.step()
             self.updates += 1
@@ -103,7 +121,12 @@ class SimCLR:
             # warmup for the first 10 epochs
             if(self.updates/self.save_interval >= 10):
                 self.scheduler.step()
-            self.writer.add_scalar('Representation/cosine_lr_decay', self.scheduler.get_lr()[0], global_step=self.updates)
+            # self.writer.add_scalar('Representation/cosine_lr_decay', self.scheduler.get_lr()[0], global_step=self.updates)
+            self.writer_buffer.append(('Representation/cosine_lr_decay', self.scheduler.get_lr()[0], self.updates))
+            
+            # Reduce GPU memory usage
+            del loss
+            del xis, xjs
 
         return self.encode(self._batch_view(self.data)).view(self.num_steps, self.num_processes, -1)
 
@@ -145,3 +168,9 @@ class SimCLR:
                 print("Loaded pre-trained model with success.")
             except FileNotFoundError:
                 print("Pre-trained weights not found. Training from scratch.")
+    
+    def get_writer_buffer(self):
+        buffer = deepcopy(self.writer_buffer)
+        self.writer_buffer.clear()
+        return buffer
+        

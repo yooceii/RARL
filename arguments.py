@@ -120,7 +120,7 @@ def get_args():
     parser.add_argument(
         '--env-name',
         default='procgen:procgen-coinrun-v0',
-        help='environment to train on (default: PongNoFrameskip-v4)')
+        help='environment to train on (default: procgen:procgen-coinrun-v0)')
     parser.add_argument(
         '--log-dir',
         default='_rarl',
@@ -168,8 +168,8 @@ def get_args():
         default=512,
         help='Observation encoding size')
     parser.add_argument(
-        '-contrastive-loss-temp',
-        default=.1,
+        '--contrastive-loss-temp',
+        default=.5,
         help = 'Temperature for contrastive loss where 0 < t <= 1')
     print('Cosine Similarity causes memory issues, check SimCLR for bug')
     parser.add_argument(
